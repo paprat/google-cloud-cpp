@@ -25,6 +25,7 @@
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <thread>
 
 // Define the defaults using a pre-processor macro, this allows the application
 // developers to change the defaults for their application by compiling with
@@ -130,24 +131,32 @@ class AuthorizedUserCredentials : public storage::Credentials {
       return true;
     }
 
-    // TODO(#516) - use retry policies to refresh the credentials.
-    auto response = request_.MakeRequest();
-    if (200 != response.status_code) {
-      return false;
+    google::cloud::storage::Status last_status;
+    while(not retry_policy_->IsExhausted()) {
+      auto response = request_.MakeRequest();
+      if (200 == response.status_code) {
+        nl::json access_token = nl::json::parse(response.payload);
+        std::string header = "Authorization: ";
+        header += access_token["token_type"].get_ref<std::string const&>();
+        header += ' ';
+        header += access_token["access_token"].get_ref<std::string const&>();
+        std::string new_id = access_token["id_token"];
+        auto expires_in = std::chrono::seconds(access_token["expires_in"]);
+        auto new_expiration = std::chrono::system_clock::now() + expires_in -
+            GoogleOAuthTokenExpirationSlack();
+        // Do not update any state until all potential exceptions are raised.
+        authorization_header_ = std::move(header);
+        expiration_time_ = new_expiration;
+        return true;
+      }
+      last_status = google::cloud::storage::Status(response.status_code);
+      if (not retry_policy_->OnFailure(last_status)) {
+        return false;
+      }
+      auto delay = backoff_policy_->OnCompletion();
+      std::this_thread::sleep_for(delay);
     }
-    nl::json access_token = nl::json::parse(response.payload);
-    std::string header = "Authorization: ";
-    header += access_token["token_type"].get_ref<std::string const&>();
-    header += ' ';
-    header += access_token["access_token"].get_ref<std::string const&>();
-    std::string new_id = access_token["id_token"];
-    auto expires_in = std::chrono::seconds(access_token["expires_in"]);
-    auto new_expiration = std::chrono::system_clock::now() + expires_in -
-                          GoogleOAuthTokenExpirationSlack();
-    // Do not update any state until all potential exceptions are raised.
-    authorization_header_ = std::move(header);
-    expiration_time_ = new_expiration;
-    return true;
+    return false;
   }
 
   void Apply(RetryPolicy& policy) { retry_policy_ = policy.clone(); }

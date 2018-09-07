@@ -35,6 +35,9 @@ class Status {
  public:
   Status() : status_code_(200) {}
 
+  explicit Status(long status_code)
+      : status_code_(status_code), error_message_(), error_details_() {}
+
   explicit Status(long status_code, std::string error_message)
       : status_code_(status_code),
         error_message_(std::move(error_message)),
