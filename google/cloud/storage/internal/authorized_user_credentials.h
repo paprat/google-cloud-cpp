@@ -19,11 +19,32 @@
 #include "google/cloud/storage/internal/credential_constants.h"
 #include "google/cloud/storage/internal/curl_request_builder.h"
 #include "google/cloud/storage/internal/nljson.h"
+#include "google/cloud/storage/retry_policy.h"
 #include <chrono>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
 #include <string>
+
+// Define the defaults using a pre-processor macro, this allows the application
+// developers to change the defaults for their application by compiling with
+// different values.
+#ifndef STORAGE_CLIENT_DEFAULT_MAXIMUM_RETRY_PERIOD
+#define STORAGE_CLIENT_DEFAULT_MAXIMUM_RETRY_PERIOD std::chrono::minutes(15)
+#endif  // STORAGE_CLIENT_DEFAULT_MAXIMUM_RETRY_PERIOD
+
+#ifndef STORAGE_CLIENT_DEFAULT_INITIAL_BACKOFF_DELAY
+#define STORAGE_CLIENT_DEFAULT_INITIAL_BACKOFF_DELAY \
+  std::chrono::milliseconds(10)
+#endif  // STORAGE_CLIENT_DEFAULT_INITIAL_BACKOFF_DELAY
+
+#ifndef STORAGE_CLIENT_DEFAULT_MAXIMUM_BACKOFF_DELAY
+#define STORAGE_CLIENT_DEFAULT_MAXIMUM_BACKOFF_DELAY std::chrono::minutes(5)
+#endif  // STORAGE_CLIENT_DEFAULT_MAXIMUM_BACKOFF_DELAY
+
+#ifndef STORAGE_CLIENT_DEFAULT_BACKOFF_SCALING
+#define STORAGE_CLIENT_DEFAULT_BACKOFF_SCALING 2.0
+#endif  //  STORAGE_CLIENT_DEFAULT_BACKOFF_SCALING
 
 namespace google {
 namespace cloud {
@@ -55,9 +76,33 @@ class AuthorizedUserCredentials : public storage::Credentials {
   explicit AuthorizedUserCredentials(std::string const& contents)
       : AuthorizedUserCredentials(contents, GoogleOAuthRefreshEndpoint()) {}
 
+  template <typename... Policies>
+  explicit AuthorizedUserCredentials(std::string const& contents,
+                                     Policies&... policies)
+      : AuthorizedUserCredentials(contents, GoogleOAuthRefreshEndpoint()) {
+    ApplyPolicies(std::forward<Policies>(policies)...);
+  }
+
+  template <typename... Policies>
+  explicit AuthorizedUserCredentials(std::string const& contents,
+                                     std::string oauth_server,
+                                     Policies&... policies)
+      : AuthorizedUserCredentials(contents, oauth_server) {
+    ApplyPolicies(std::forward<Policies>(policies)...);
+  }
+
   explicit AuthorizedUserCredentials(std::string const& content,
                                      std::string oauth_server)
       : expiration_time_() {
+    retry_policy_ =
+        LimitedTimeRetryPolicy(STORAGE_CLIENT_DEFAULT_MAXIMUM_RETRY_PERIOD)
+            .clone();
+    backoff_policy_ =
+        ExponentialBackoffPolicy(STORAGE_CLIENT_DEFAULT_INITIAL_BACKOFF_DELAY,
+                                 STORAGE_CLIENT_DEFAULT_MAXIMUM_BACKOFF_DELAY,
+                                 STORAGE_CLIENT_DEFAULT_BACKOFF_SCALING)
+            .clone();
+
     HttpRequestBuilderType request_builder(std::move(oauth_server));
     auto credentials = nl::json::parse(content);
     std::string payload("grant_type=refresh_token");
@@ -105,11 +150,25 @@ class AuthorizedUserCredentials : public storage::Credentials {
     return true;
   }
 
+  void Apply(RetryPolicy& policy) { retry_policy_ = policy.clone(); }
+
+  void Apply(BackoffPolicy& policy) { backoff_policy_ = policy.clone(); }
+
+  void ApplyPolicies() {}
+
+  template <typename P, typename... Policies>
+  void ApplyPolicies(P&& head, Policies&&... policies) {
+    Apply(head);
+    ApplyPolicies(std::forward<Policies>(policies)...);
+  }
+
   typename HttpRequestBuilderType::RequestType request_;
   std::mutex mu_;
   std::condition_variable cv_;
   std::string authorization_header_;
   std::chrono::system_clock::time_point expiration_time_;
+  std::shared_ptr<RetryPolicy> retry_policy_;
+  std::shared_ptr<BackoffPolicy> backoff_policy_;
 };
 
 }  // namespace internal
