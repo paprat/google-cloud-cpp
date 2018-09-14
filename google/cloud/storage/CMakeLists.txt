@@ -188,6 +188,7 @@ add_library(storage_client
             service_account.h
             service_account.cc
             status.h
+            status_code_enum.h
             storage_class.h
             version.h
             version.cc

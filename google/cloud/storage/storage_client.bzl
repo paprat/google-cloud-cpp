@@ -55,6 +55,7 @@ storage_client_HDRS = [
     "retry_policy.h",
     "service_account.h",
     "status.h",
+    "status_code_enum.h",
     "storage_class.h",
     "version.h",
     "well_known_headers.h",
